@@ -1,5 +1,3 @@
-# assumes pandas is NOT installed in the environment
-
 import numpy as np
 import pandas as pd
 

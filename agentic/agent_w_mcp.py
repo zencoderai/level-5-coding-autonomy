@@ -11,6 +11,15 @@ from mcp.client.stdio import stdio_client
 
 load_dotenv()
 
+ANTHROPIC_WEB_SEARCH = [
+    {
+        "type": "web_search_20250305",
+        "name": "web_search",
+        "max_uses": 5
+    }
+]
+MAX_TOKENS = 8192
+
 
 class MCPClient:
     def __init__(self):
@@ -21,7 +30,6 @@ class MCPClient:
     async def connect_to_servers(self, server_configs: Dict[str, Any]):
         stdio_transports = []
         for server_config in server_configs.values():
-            print(server_config)
             server_params = StdioServerParameters(
                 command=server_config["command"],
                 args=server_config["args"],
@@ -38,9 +46,9 @@ class MCPClient:
             await session.initialize()
             response = await session.list_tools()
             tools = response.tools
-            print("\nConnected to server with tools:", [tool.name for tool in tools])
+            print("\033[92mConnected to server with tools\033[0m:", [tool.name for tool in tools])
 
-    async def process_query(self, user_query: str, max_iter: int = 10) -> str:
+    async def process_query(self, user_query: str, max_iter: int = 20) -> str:
         messages = [
             {
                 "role": "user",
@@ -60,36 +68,45 @@ class MCPClient:
                 "description": tool.description,
                 "input_schema": tool.inputSchema
             } for tool in response.tools]
+        available_tools += ANTHROPIC_WEB_SEARCH
 
         response = self.anthropic.messages.create(
             model="claude-3-7-sonnet-20250219",
-            max_tokens=1000,
+            max_tokens=MAX_TOKENS,
             messages=messages,
             tools=available_tools
         )
 
         counter = 1
         while counter < max_iter:
-            print(f"Loop: {counter}\n\n")
+            print(f"\n\033[95mLoop\033[0m: {counter}")
 
             tool_results = []
-    
+            # for anthropic's web search tool the agent outputs multipls text blocks, so combining them into one
+            is_previous_content_text = False
+            all_texts = []
             for content in response.content:
-                if content.type == "text":
+                if content.type == "text" and content.text:
                     messages.append({
                         "role": "assistant",
-                        "content": content.text
+                        "content": content.text.strip("\n")
                     })
-                    print("Agent thinking: ", content.text)
+                    if not is_previous_content_text:
+                        is_previous_content_text = True
+                    all_texts.append(content.text)
                 elif content.type == "tool_use":
+                    # reset text compilation
+                    is_previous_content_text = False
+                    if all_texts:
+                        print("\033[92mAgent\033[0m: ", "\n".join(all_texts))
+                        all_texts = []
                     tool_name = content.name
                     tool_args = content.input
     
                     result = await tool2session[tool_name].call_tool(tool_name, tool_args)
                     tool_results.append({"call": tool_name, "result": result})
-                    print(f"[Calling tool {tool_name} with args {tool_args}]")
-                    print(f"Result: {result.content[0].text}")
-    
+                    print(f"\033[96mCalling tool\033[0m \033[93m{tool_name}\033[0m \033[96mwith the following input\033[0m: \033[93m{tool_args}\033[0m")
+                    print(f"\033[94mTool call result\033[0m: {result.content[0].text}")
                     if hasattr(content, 'text') and content.text:
                         messages.append({
                             "role": "assistant",
@@ -99,17 +116,45 @@ class MCPClient:
                         "role": "user",
                         "content": result.content
                     })
-
+                elif content.type == "server_tool_use":
+                    # reset text compilation
+                    is_previous_content_text = False
+                    if all_texts:
+                        print("\033[92mAgent\033[0m: ", "\n".join(all_texts))
+                        all_texts = []
+                    tool_name = content.name
+                    tool_args = content.input
+                    print(f"\033[96mCalling remote tool\033[0m \033[93m{tool_name}\033[0m \033[96mwith the following input\033[0m: \033[93m{tool_args}\033[0m")
+                    if hasattr(content, 'text') and content.text:
+                        messages.append({
+                            "role": "assistant",
+                            "content": content.text
+                        })
+                elif content.type == "web_search_tool_result":
+                    # reset text compilation
+                    is_previous_content_text = False
+                    if all_texts:
+                        print("\033[92mAgent\033[0m: ", "\n".join(all_texts))
+                        all_texts = []
+                    for ws_result in content.content:
+                        print(f"\033[94mGot web-search result\033[0m, search request - \033[93m{ws_result['title']}\033[0m, URL - \033[93m{ws_result['url']}\033[0m")
+                    if hasattr(content, 'text') and content.text:
+                        messages.append({
+                            "role": "assistant",
+                            "content": content.text
+                        })
             response = self.anthropic.messages.create(
                 model="claude-3-5-sonnet-20241022",
-                max_tokens=1000,
+                max_tokens=MAX_TOKENS,
                 messages=messages,
                 tools=available_tools
             )
     
             counter += 1
             if response.stop_reason == "end_turn":
-                print("Agent final answer: ", response.content[0].text)
+                if response.content:
+                    all_texts.append(response.content[0].text.strip("\n"))
+                print("\033[92mAgent\033[0m: ", "\n".join(all_texts))
                 break
 
     async def cleanup(self):
@@ -117,7 +162,7 @@ class MCPClient:
 
 
 async def main():
-    server_config = json.load(open(sys.argv[1]))
+    server_config = json.load(open("server.json"))
     client = MCPClient()
     try:
         await client.connect_to_servers(server_config["mcpServers"])
@@ -129,5 +174,4 @@ async def main():
 
 
 if __name__ == "__main__":
-
     asyncio.run(main())
