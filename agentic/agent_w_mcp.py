@@ -19,6 +19,7 @@ ANTHROPIC_WEB_SEARCH = [
     }
 ]
 MAX_TOKENS = 8192
+MODEL = "claude-3-7-sonnet-20250219"
 
 
 class MCPClient:
@@ -46,9 +47,9 @@ class MCPClient:
             await session.initialize()
             response = await session.list_tools()
             tools = response.tools
-            print("\033[92mConnected to server with tools\033[0m:", [tool.name for tool in tools])
+            print("\033[92mConnected to server with tools\033[0m:", ", ".join([tool.name for tool in tools]))
 
-    async def process_query(self, user_query: str, max_iter: int = 20) -> str:
+    async def process_query(self, user_query: str, max_iter: int = 30) -> str:
         messages = [
             {
                 "role": "user",
@@ -71,10 +72,12 @@ class MCPClient:
         available_tools += ANTHROPIC_WEB_SEARCH
 
         response = self.anthropic.messages.create(
-            model="claude-3-7-sonnet-20250219",
+            model=MODEL,
             max_tokens=MAX_TOKENS,
             messages=messages,
-            tools=available_tools
+            tools=available_tools,
+            stop_sequences=["DONE"],
+            system="Put DONE to the message when you are done with the task"
         )
 
         counter = 1
@@ -87,14 +90,16 @@ class MCPClient:
             all_texts = []
             for content in response.content:
                 if content.type == "text" and content.text:
-                    messages.append({
-                        "role": "assistant",
-                        "content": content.text.strip("\n")
-                    })
+                    message = content.text.strip("\n").rstrip()
+                    if message:
+                        messages.append({
+                            "role": "assistant",
+                            "content": message
+                        })
+                        all_texts.append(message)
                     if not is_previous_content_text:
                         is_previous_content_text = True
-                    all_texts.append(content.text)
-                elif content.type == "tool_use":
+                    elif content.type == "tool_use":
                     # reset text compilation
                     is_previous_content_text = False
                     if all_texts:
@@ -102,15 +107,14 @@ class MCPClient:
                         all_texts = []
                     tool_name = content.name
                     tool_args = content.input
-    
                     result = await tool2session[tool_name].call_tool(tool_name, tool_args)
-                    tool_results.append({"call": tool_name, "result": result})
+                    tool_results.append({"call": tool_name, "result": result if result else "NO RETURN VALUE"})
                     print(f"\033[96mCalling tool\033[0m \033[93m{tool_name}\033[0m \033[96mwith the following input\033[0m: \033[93m{tool_args}\033[0m")
                     print(f"\033[94mTool call result\033[0m: {result.content[0].text}")
                     if hasattr(content, 'text') and content.text:
                         messages.append({
                             "role": "assistant",
-                            "content": content.text
+                            "content": content.text.rstrip()
                         })
                     messages.append({
                         "role": "user",
@@ -128,7 +132,7 @@ class MCPClient:
                     if hasattr(content, 'text') and content.text:
                         messages.append({
                             "role": "assistant",
-                            "content": content.text
+                            "content": content.text.rstrip()
                         })
                 elif content.type == "web_search_tool_result":
                     # reset text compilation
@@ -141,21 +145,33 @@ class MCPClient:
                     if hasattr(content, 'text') and content.text:
                         messages.append({
                             "role": "assistant",
-                            "content": content.text
+                            "content": content.text.rstrip()
                         })
+
             response = self.anthropic.messages.create(
-                model="claude-3-5-sonnet-20241022",
+                model=MODEL,
                 max_tokens=MAX_TOKENS,
                 messages=messages,
-                tools=available_tools
+                tools=available_tools,
+                stop_sequences=["DONE"],
+                system="Put DONE to the message when you are done with the task"
             )
-    
+
             counter += 1
-            if response.stop_reason == "end_turn":
-                if response.content:
+            if response.stop_reason == "stop_sequence":
+                if response.content and response.content[0].text:
                     all_texts.append(response.content[0].text.strip("\n"))
                 print("\033[92mAgent\033[0m: ", "\n".join(all_texts))
                 break
+            elif response.content and response.content[0].type == "text" and not response.content[0].text.rstrip():
+                # some encouragement for Claude
+                messages.append({
+                        "role": "user",
+                        "content": "Go on"
+                    })
+            else:
+                if all_texts:
+                    print("\033[92mAgent\033[0m: ", "\n".join(all_texts))
 
     async def cleanup(self):
         await self.exit_stack.aclose()
